@@ -1,0 +1,32 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
+  <!-- Fond noir avec coins arrondis pour iOS -->
+  <rect width="512" height="512" rx="96" ry="96" fill="#0a0a0a"/>
+  
+  <!-- Motif subtil de rayures diagonales en arrière-plan -->
+  <defs>
+    <pattern id="stripes" patternUnits="userSpaceOnUse" width="24" height="24" patternTransform="rotate(45)">
+      <rect width="24" height="24" fill="none"/>
+      <rect width="4" height="24" fill="#FF6B00" opacity="0.05"/>
+    </pattern>
+  </defs>
+  <rect width="512" height="512" rx="96" ry="96" fill="url(#stripes)"/>
+  
+  <!-- Logo ressort stylisé au centre, orange -->
+  <g transform="translate(256 256)">
+    <!-- Zigzag du logo, agrandi -->
+    <path d="M -96 0 L -64 -96 L -32 0 L 0 -96 L 32 0 L 64 -96 L 96 0 L 64 96 L 32 0 L 0 96 L -32 0 L -64 96 Z" 
+          fill="#FF6B00" opacity="0.95"/>
+  </g>
+  
+  <!-- Texte en bas -->
+  <text x="256" y="440" 
+        font-family="Arial Black, sans-serif" 
+        font-size="56" 
+        font-weight="900" 
+        fill="#F5F5F5" 
+        text-anchor="middle" 
+        letter-spacing="4">RESSORT</text>
+  
+  <!-- Petit point orange -->
+  <circle cx="256" cy="470" r="6" fill="#FF6B00"/>
+</svg>
