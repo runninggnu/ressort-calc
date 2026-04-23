@@ -606,7 +606,37 @@ function parseTorsionOCR(text) {
       }
     }
 
-    // Fallback 2: si UNE seule ligne a quant>0, c'est elle
+    // Fallback 2: DÉDUCTION PAR ÉLIMINATION
+    // Cas typique: tesseract.js mobile ne lit que 4 des 5 lignes du tableau
+    // parce que la ligne avec la flèche manuscrite est trop bruitée pour être détectée.
+    // Solution: si on a exactement 4 diamètres distincts parmi les 5 connus, 
+    // le 5ème (manquant) est nécessairement celui choisi.
+    if (!chosen) {
+      const ALL_DIAMETRES = [1.75, 2.625, 3.75, 5.25, 6.0];
+      const foundDiameters = new Set(tableRows.map(r => r.diametre).filter(d => d != null));
+      const missing = ALL_DIAMETRES.filter(d => !foundDiameters.has(d));
+
+      if (missing.length === 1 && foundDiameters.size === 4) {
+        // La Maille est presque toujours constante pour toutes les lignes du tableau;
+        // on prend la valeur la plus fréquente parmi les lignes détectées.
+        const mailleCounts = {};
+        tableRows.forEach(r => {
+          if (r.maille != null) mailleCounts[r.maille] = (mailleCounts[r.maille] || 0) + 1;
+        });
+        const mostCommonMaille = Object.keys(mailleCounts)
+          .sort((a, b) => mailleCounts[b] - mailleCounts[a])[0];
+
+        chosen = {
+          diametre: missing[0],
+          maille: mostCommonMaille ? parseInt(mostCommonMaille) : null,
+          long: null, // impossible à déterminer, l'utilisateur doit le saisir
+          _byElimination: true,
+        };
+        result._debug.deduction = `Ligne sélectionnée non détectée par l'OCR. Diamètre ${missing[0]} déduit par élimination (les 4 autres sont visibles). Vérifiez la longueur — elle n'a pas pu être lue.`;
+      }
+    }
+
+    // Fallback 3: si UNE seule ligne a quant>0, c'est elle
     if (!chosen) {
       const withQuant = tableRows.filter(r => r.quant != null && r.quant > 0);
       if (withQuant.length === 1) {
@@ -620,8 +650,8 @@ function parseTorsionOCR(text) {
 
     if (chosen) {
       result.Diametre = chosen.diametre;
-      result.Maille = chosen.maille;
-      result.Long = chosen.long;
+      if (chosen.maille != null) result.Maille = chosen.maille;
+      if (chosen.long != null) result.Long = chosen.long;
     }
   }
 
@@ -1113,9 +1143,19 @@ function OCRCapture({ config, onExtract, show, setShow, accentColor }) {
                   ✓ Pillow block détecté
                 </div>
               )}
+              {debug.deduction && (
+                <div className="p-2.5 border border-sky-900/50 bg-sky-950/20 rounded text-xs text-sky-200/90">
+                  <span className="font-mono text-sky-400">ℹ Déduction :</span> {debug.deduction}
+                </div>
+              )}
               {debug.incertain && (
                 <div className="p-2.5 border border-yellow-900/50 bg-yellow-950/20 rounded text-xs text-yellow-200/80">
                   <span className="font-mono text-yellow-500">⚠</span> {debug.incertain}. Vérifiez le diamètre choisi.
+                </div>
+              )}
+              {debug.note && (
+                <div className="p-2 bg-neutral-900 border border-neutral-800 rounded text-[11px] font-mono text-neutral-400">
+                  ℹ {debug.note}
                 </div>
               )}
 
