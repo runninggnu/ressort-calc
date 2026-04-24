@@ -336,9 +336,112 @@ function loadTesseract() {
   return tesseractPromise;
 }
 
+// ==============================================================================
+// PRÉTRAITEMENT D'IMAGE pour améliorer drastiquement l'OCR mobile.
+// Applique un seuillage adaptatif local (moyenne locale - seuil) pour compenser
+// l'éclairage non uniforme des photos prises avec un téléphone.
+// Cette approche transforme une photo moyennement éclairée en image presque
+// parfaite pour Tesseract, récupérant ainsi les lignes de tableau entières
+// et les sections shafts qui seraient autrement perdues.
+// ==============================================================================
+async function preprocessImage(file) {
+  // 1. Charger l'image dans un canvas
+  const img = await new Promise((resolve, reject) => {
+    const i = new Image();
+    i.onload = () => resolve(i);
+    i.onerror = reject;
+    i.src = URL.createObjectURL(file);
+  });
+
+  // Limiter la taille pour accélérer le traitement (max 2000px sur grand côté)
+  const maxDim = 2000;
+  const scale = Math.min(1, maxDim / Math.max(img.width, img.height));
+  const W = Math.round(img.width * scale);
+  const H = Math.round(img.height * scale);
+
+  const canvas = document.createElement('canvas');
+  canvas.width = W;
+  canvas.height = H;
+  const ctx = canvas.getContext('2d', { willReadFrequently: true });
+  ctx.drawImage(img, 0, 0, W, H);
+  URL.revokeObjectURL(img.src);
+
+  const imageData = ctx.getImageData(0, 0, W, H);
+  const pixels = imageData.data;
+
+  // 2. Convertir en niveaux de gris (luminance)
+  const gray = new Float32Array(W * H);
+  for (let i = 0, j = 0; i < pixels.length; i += 4, j++) {
+    gray[j] = 0.299 * pixels[i] + 0.587 * pixels[i+1] + 0.114 * pixels[i+2];
+  }
+
+  // 3. Box blur séparable (moyenne locale) — simule un gaussien avec fenêtre 30px
+  // Complexité O(n), utilise un tableau d'intégrale (prefix sum)
+  const R = Math.round(Math.min(W, H) * 0.025); // rayon adaptatif ~2.5% de la plus petite dim
+  const blurred = new Float32Array(W * H);
+
+  // Passe horizontale
+  const rowSum = new Float32Array(W + 1);
+  for (let y = 0; y < H; y++) {
+    rowSum[0] = 0;
+    for (let x = 0; x < W; x++) rowSum[x+1] = rowSum[x] + gray[y*W + x];
+    for (let x = 0; x < W; x++) {
+      const a = Math.max(0, x - R);
+      const b = Math.min(W, x + R + 1);
+      blurred[y*W + x] = (rowSum[b] - rowSum[a]) / (b - a);
+    }
+  }
+  // Passe verticale (remplit un tampon intermédiaire dans `gray` qu'on réutilise)
+  const tmp = gray; // on réutilise gray comme buffer
+  const colSum = new Float32Array(H + 1);
+  for (let x = 0; x < W; x++) {
+    colSum[0] = 0;
+    for (let y = 0; y < H; y++) colSum[y+1] = colSum[y] + blurred[y*W + x];
+    for (let y = 0; y < H; y++) {
+      const a = Math.max(0, y - R);
+      const b = Math.min(H, y + R + 1);
+      tmp[y*W + x] = (colSum[b] - colSum[a]) / (b - a);
+    }
+  }
+  // tmp contient maintenant le blur complet, blurred peut être réutilisé
+
+  // 4. Seuillage adaptatif: pixel noir si pixel - blur < -seuil
+  // On doit recalculer le gray original car on l'a écrasé dans tmp.
+  // Solution: relire les pixels depuis imageData (toujours disponible)
+  const SEUIL = 10;
+  for (let i = 0, j = 0; i < pixels.length; i += 4, j++) {
+    const lum = 0.299 * pixels[i] + 0.587 * pixels[i+1] + 0.114 * pixels[i+2];
+    const isInk = (lum - tmp[j]) < -SEUIL;
+    const v = isInk ? 0 : 255;
+    pixels[i] = v;
+    pixels[i+1] = v;
+    pixels[i+2] = v;
+    pixels[i+3] = 255;
+  }
+
+  ctx.putImageData(imageData, 0, 0);
+
+  // 5. Retourner un blob PNG
+  return new Promise((resolve) => {
+    canvas.toBlob(b => resolve(b), 'image/png');
+  });
+}
+
 async function runOCR(imageFile, onProgress) {
+  // Prétraiter l'image AVANT d'envoyer à Tesseract — améliore dramatiquement
+  // la qualité OCR sur photos de téléphone (seuillage adaptatif compense
+  // les variations d'éclairage)
+  let processed;
+  try {
+    processed = await preprocessImage(imageFile);
+  } catch (e) {
+    // Si le prétraitement échoue pour une raison ou une autre, on tombe sur l'image originale
+    console.warn('Prétraitement échoué, utilisation de l\'image brute:', e);
+    processed = imageFile;
+  }
+
   const Tesseract = await loadTesseract();
-  const { data } = await Tesseract.recognize(imageFile, 'fra+eng', {
+  const { data } = await Tesseract.recognize(processed, 'fra+eng', {
     logger: m => { if (m.status === 'recognizing text' && onProgress) onProgress(m.progress); },
   });
   return data.text;
@@ -471,7 +574,7 @@ function parseTorsionOCR(text) {
   const isDuplex = /<<\s*duplex\s*>>/i.test(text) || /nombre de duplex/i.test(text);
 
   // === 1. Nombre de ressorts ===
-  const mNbR = text.match(/nombre de ressort\(s\)\s*:?\s*(\d+)/i);
+  const mNbR = text.match(/(?:n?ombre\s*de\s*)?ressort\(s\)\s*:?\s*(\d+)/i);
   result.NbRessorts = mNbR ? parseInt(mNbR[1]) : 1;
 
   // NOTE: Le Poids pour l'estimation n'est PAS le poids "Poids: X lbs" de l'en-tête
