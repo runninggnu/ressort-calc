@@ -474,16 +474,10 @@ function parseTorsionOCR(text) {
   const mNbR = text.match(/nombre de ressort\(s\)\s*:?\s*(\d+)/i);
   result.NbRessorts = mNbR ? parseInt(mNbR[1]) : 1;
 
-  // === 2. Poids total ===
-  const poidsLines = lines.filter(l =>
-    /poids\s*:/i.test(l) &&
-    /(?:lbs|ibs)/i.test(l) &&
-    !/fen[êe]tres|total|exp[ée]dition/i.test(l)
-  );
-  if (poidsLines.length > 0) {
-    const m = poidsLines[0].match(/poids\s*:\s*(\d+(?:[.,]\d+)?)\s*(?:lbs|ibs)/i);
-    if (m) result.Poids = parseFloat(m[1].replace(',', '.'));
-  }
+  // NOTE: Le Poids pour l'estimation n'est PAS le poids "Poids: X lbs" de l'en-tête
+  // (qui inclut tambour/câbles/quincaillerie, ex: 179 lbs). C'est le poids TOTAL
+  // des ressorts: Poids_unitaire_du_tableau × NbRessorts. On le calcule plus bas
+  // à partir de la ligne choisie du tableau.
 
   if (isDuplex) {
     result.Duplex = 1;
@@ -508,6 +502,10 @@ function parseTorsionOCR(text) {
       result.Maille = primary.maille;
       result.Long = primary.long;
       result._debug.duplexRows = duplexRows;
+      // En mode Duplex, on ne peut pas extraire le Poids automatiquement:
+      // le tableau n'a pas de colonne Poids, et le "Poids: X lbs" du header
+      // correspond à la quincaillerie totale, pas aux ressorts.
+      result._debug.deduction = 'Duplex détecté. Le poids des ressorts doit être saisi manuellement (pas disponible dans la feuille).';
     }
   } else {
     // === MODE NORMAL — détection par forme caractéristique ===
@@ -524,7 +522,11 @@ function parseTorsionOCR(text) {
       if (!gdMatch) continue;
 
       const before = raw.slice(0, gdMatch.index);
-      const after  = raw.slice(gdMatch.index + gdMatch[0].length);
+      // Le regex GD consomme un chiffre à la fin (pour distinguer de "GESTION DCG").
+      // On le remet dans 'after' pour que la lecture des colonnes Poids/Libre/Quant
+      // retrouve la bonne valeur du poids unitaire.
+      const consumedDigit = gdMatch[0].match(/\d$/)?.[0] || '';
+      const after = consumedDigit + raw.slice(gdMatch.index + gdMatch[0].length);
 
       // Tokeniser 'before' en gardant seulement les tokens numériques
       const beforeTokens = (before.match(/\S+/g) || []);
@@ -632,7 +634,7 @@ function parseTorsionOCR(text) {
           long: null, // impossible à déterminer, l'utilisateur doit le saisir
           _byElimination: true,
         };
-        result._debug.deduction = `Ligne sélectionnée non détectée par l'OCR. Diamètre ${missing[0]} déduit par élimination (les 4 autres sont visibles). Vérifiez la longueur — elle n'a pas pu être lue.`;
+        result._debug.deduction = `Ligne sélectionnée non détectée par l'OCR. Diamètre ${missing[0]} déduit par élimination (les 4 autres sont visibles). Vérifiez la longueur et le poids — ils n'ont pas pu être lus.`;
       }
     }
 
@@ -652,6 +654,14 @@ function parseTorsionOCR(text) {
       result.Diametre = chosen.diametre;
       if (chosen.maille != null) result.Maille = chosen.maille;
       if (chosen.long != null) result.Long = chosen.long;
+      // Le Poids est le poids UNITAIRE du ressort (tel qu'écrit dans la colonne
+      // "Poids" du tableau de la feuille). Le nombre de ressorts est un champ
+      // séparé — on ne multiplie PAS par NbRessorts, car la convention des
+      // données d'entraînement est la même que celle de la saisie manuelle:
+      // Poids = poids d'un ressort individuel.
+      if (chosen.poidsRessort != null && !isNaN(chosen.poidsRessort)) {
+        result.Poids = chosen.poidsRessort;
+      }
     }
   }
 
