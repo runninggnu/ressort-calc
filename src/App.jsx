@@ -566,6 +566,26 @@ function parseTorsionMaille(s) {
 function isPlausibleMaille(n) { return n >= 1800 && n <= 5500; }
 function isPlausibleLong(n)   { return n >= 5 && n <= 150; }
 
+// Parse Long value with tolerance for OCR that loses the decimal point.
+// E.g., "28,7" → 28.7 (normal) but also "287" → 28.7 (decimal lost).
+// Heuristic: if the input is an integer >= 40 without explicit decimal,
+// assume decimal was missed and divide by 10. Returns null if not plausible.
+function parseLongValue(s) {
+  if (!s) return null;
+  const str = String(s);
+  const hasDecimal = str.includes(',') || str.includes('.');
+  const n = parseFloat(str.replace(',', '.').replace(/[^0-9.]/g, ''));
+  if (isNaN(n)) return null;
+  // Integer without decimal & big enough → decimal was likely lost
+  if (!hasDecimal && Number.isInteger(n) && n >= 40 && n <= 1500) {
+    const divided = n / 10;
+    if (divided >= 5 && divided <= 150) return divided;
+  }
+  // Otherwise accept if within plausible range
+  if (n >= 5 && n <= 150) return n;
+  return null;
+}
+
 function parseTorsionOCR(text) {
   const lines = text.split('\n').map(l => l.trim()).filter(Boolean);
   const result = { _debug: {} };
@@ -650,8 +670,8 @@ function parseTorsionOCR(text) {
           for (let c = b + 1; c < candidates.length; c++) {
             const d = parseTorsionDiametre(candidates[a]);
             const m = parseTorsionMaille(candidates[b]);
-            const l = parseFloat(candidates[c].replace(',', '.'));
-            if (d != null && m != null && isPlausibleMaille(m) && !isNaN(l) && isPlausibleLong(l)) {
+            const l = parseLongValue(candidates[c]);
+            if (d != null && m != null && isPlausibleMaille(m) && l != null) {
               diam = d; maille = m; long = l;
               break outerLoop;
             }
@@ -668,8 +688,8 @@ function parseTorsionOCR(text) {
               const concat = candidates[a] + candidates[a+1];
               const d = parseTorsionDiametre(concat);
               const m = parseTorsionMaille(candidates[b]);
-              const l = parseFloat(candidates[c].replace(',', '.'));
-              if (d != null && m != null && isPlausibleMaille(m) && !isNaN(l) && isPlausibleLong(l)) {
+              const l = parseLongValue(candidates[c]);
+              if (d != null && m != null && isPlausibleMaille(m) && l != null) {
                 diam = d; maille = m; long = l;
                 break outerLoop2;
               }
@@ -684,8 +704,20 @@ function parseTorsionOCR(text) {
       const afterNums = (after.match(/-?\d+(?:[,.]\d+)?/g) || [])
         .map(t => parseFloat(t.replace(',', '.')));
 
-      // Flèche: beaucoup de variantes possibles
-      const hasArrow = /<[-—=_]+|<\s*[-—=]|<--|<—|\{---/.test(after);
+      // Détection de flèche robuste. L'OCR produit beaucoup de variantes:
+      //   "<---", "<--", "<—", "<-", "{---"  → flèche avec '<' intact
+      //   "—", "---" seuls                    → flèche dont le '<' est perdu
+      //
+      // Pour distinguer une vraie flèche du bruit ('2 —— ——' en fin de ligne
+      // qui sont des séparateurs mal lus), on applique deux patterns stricts:
+      //   p1: chiffre + espaces + '<' + éventuellement tirets. Si '<' présent,
+      //       c'est une flèche sans ambiguïté.
+      //   p2: chiffre + espaces + 1-3 tirets + espaces + caractère alphabétique
+      //       ou crochet (lettre/bruit OCR qui suit la flèche). Exclut le cas
+      //       où les tirets sont suivis d'autres tirets (séparateurs de tableau).
+      const arrowExplicit = /\d\s{1,3}<[-—=_\u2014\u2013\u2015]*\S*/;
+      const arrowImplicit = /\d\s{1,3}[\u2014\u2013\u2015—\-]{1,3}\s+[A-Za-z\[\{\|\(]/;
+      const hasArrow = arrowExplicit.test(raw) || arrowImplicit.test(raw);
 
       tableRows.push({
         diametre: diam,
