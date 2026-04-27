@@ -698,7 +698,36 @@ function parseTorsionOCR(text) {
         }
       }
 
-      if (diam == null) continue;
+      // Essai 3 (récupération): si diam est null mais qu'on a une maille plausible
+      // dans la ligne, c'est probablement une ligne de tableau dont le diamètre OCR
+      // est totalement illisible (cas HUDON où "1 3/4" a été lu comme "Le Lo :;, 90,").
+      // On garde quand même la ligne; le diamètre sera assigné par position plus tard.
+      if (diam == null) {
+        for (const t of numericTokens) {
+          const m = parseTorsionMaille(t);
+          if (m != null && isPlausibleMaille(m)) {
+            maille = m;
+            // Tenter de trouver Long: le premier nombre plausible APRÈS la maille
+            const idx = numericTokens.indexOf(t);
+            for (let k = idx + 1; k < numericTokens.length; k++) {
+              const l = parseLongValue(numericTokens[k]);
+              if (l != null) { long = l; break; }
+            }
+            break;
+          }
+        }
+        // Si on n'a toujours pas de maille, on accepte la ligne quand même si elle
+        // contient G D : la position dans la séquence détermine le diamètre.
+        // C'est le cas HUDON "Le Lo :;, 90, GD 40 84 1 fer" où l'OCR a massacré
+        // tout le début mais G D est bien là.
+        // On essaie quand même d'extraire Long depuis le 1er token plausible.
+        if (maille == null) {
+          for (const t of numericTokens) {
+            const l = parseLongValue(t);
+            if (l != null) { long = l; break; }
+          }
+        }
+      }
 
       // Extraire poids/libre/quant après "G D"
       const afterNums = (after.match(/-?\d+(?:[,.]\d+)?/g) || [])
@@ -720,7 +749,8 @@ function parseTorsionOCR(text) {
       const hasArrow = arrowExplicit.test(raw) || arrowImplicit.test(raw);
 
       tableRows.push({
-        diametre: diam,
+        diametre: diam,        // peut être null si OCR du diamètre illisible
+        diamFromOCR: diam,     // ce que l'OCR a réussi à lire (pour debug)
         maille: maille,
         long: long,
         poidsRessort: afterNums[0] ?? null,
@@ -728,6 +758,23 @@ function parseTorsionOCR(text) {
         quant: afterNums[2] ?? null,
         hasArrow,
         lineIdx: i,
+      });
+    }
+
+    // === ASSIGNATION DES DIAMÈTRES PAR POSITION ===
+    // Si on a détecté pile 5 lignes G D, le diamètre de chaque ligne est déterminé
+    // par sa position (1 3/4, 2 5/8, 3 3/4, 5 1/4, 6,0 dans cet ordre fixe).
+    // Cette stratégie est plus robuste que de se fier à l'OCR du diamètre, qui
+    // peut être totalement illisible ("Le Lo :;, 90, GD" pour la ligne 1 3/4).
+    const ALL_DIAMETRES = [1.75, 2.625, 3.75, 5.25, 6.0];
+    if (tableRows.length === 5) {
+      tableRows.forEach((r, i) => {
+        // Si l'OCR a réussi à lire le diamètre ET il diffère de la position,
+        // on garde la position (plus fiable). On enregistre le désaccord pour debug.
+        if (r.diamFromOCR != null && r.diamFromOCR !== ALL_DIAMETRES[i]) {
+          r._diamConflict = `OCR=${r.diamFromOCR}, position=${ALL_DIAMETRES[i]}`;
+        }
+        r.diametre = ALL_DIAMETRES[i];
       });
     }
 
@@ -748,12 +795,11 @@ function parseTorsionOCR(text) {
     // parce que la ligne avec la flèche manuscrite est trop bruitée pour être détectée.
     // Solution: si on a exactement 4 diamètres distincts parmi les 5 connus, 
     // le 5ème (manquant) est nécessairement celui choisi.
-    if (!chosen) {
-      const ALL_DIAMETRES = [1.75, 2.625, 3.75, 5.25, 6.0];
+    if (!chosen && tableRows.length === 4) {
       const foundDiameters = new Set(tableRows.map(r => r.diametre).filter(d => d != null));
       const missing = ALL_DIAMETRES.filter(d => !foundDiameters.has(d));
 
-      if (missing.length === 1 && foundDiameters.size === 4) {
+      if (missing.length === 1) {
         // La Maille est presque toujours constante pour toutes les lignes du tableau;
         // on prend la valeur la plus fréquente parmi les lignes détectées.
         const mailleCounts = {};
@@ -773,8 +819,21 @@ function parseTorsionOCR(text) {
       }
     }
 
-    // Fallback 3: si UNE seule ligne a quant>0, c'est elle
-    if (!chosen) {
+    // Fallback 3: 5 lignes détectées mais aucune flèche → AMBIGUÏTÉ
+    // On présente les 5 options à l'utilisateur dans l'interface plutôt que
+    // de choisir automatiquement (ce qui mènerait à un faux positif).
+    if (!chosen && tableRows.length === 5) {
+      result._debug.needsRowChoice = tableRows.map(r => ({
+        diametre: r.diametre,
+        long: r.long,
+        poidsRessort: r.poidsRessort,
+        maille: r.maille,
+      }));
+      result._debug.deduction = `5 lignes du tableau détectées mais la flèche de sélection n'a pas pu être lue. Choisissez la ligne correspondant à la flèche sur la feuille papier.`;
+    }
+
+    // Fallback 4: si UNE seule ligne a quant>0, c'est elle
+    if (!chosen && !result._debug.needsRowChoice) {
       const withQuant = tableRows.filter(r => r.quant != null && r.quant > 0);
       if (withQuant.length === 1) {
         chosen = withQuant[0];
@@ -800,16 +859,19 @@ function parseTorsionOCR(text) {
     }
   }
 
-  // === 3. Shafts — détection tolérante (sans exiger [N] en préfixe) ===
+  // === 3. Shafts — détection tolérante (sans exiger [N] en préfixe, sans
+  //          word-boundaries — l'OCR colle parfois les mots, ex: 'Amrepleinix'
+  //          au lieu de '[1]  Arbre plein x') ===
   let tubingCount = 0, pleinCount = 0, longShaft = null;
   for (const line of lines) {
     const lineL = line.toLowerCase();
-    const isTube = /\btube\b/.test(lineL);
-    const isPlein = /arbre\s*plein|\bplein\b/.test(lineL);
+    const isTube = /\btube\b/i.test(lineL);
+    // Sans \b autour de 'plein' pour capturer 'Amrepleinix' (OCR mangling)
+    const isPlein = /arbre\s*plein|plein/i.test(lineL);
     if (!isTube && !isPlein) continue;
 
-    // Nombre juste avant "Tube" ou "Arbre"
-    const wordPos = lineL.search(/\btube\b|\barbre\s*plein\b|\bplein\b/);
+    // Nombre juste avant "Tube" ou "Plein" (chercher position du mot-clé)
+    const wordPos = lineL.search(/\btube\b|arbre\s*plein|plein/i);
     const beforeWord = line.slice(0, wordPos);
     const prefixNumbers = beforeWord.match(/\d+/g) || [];
     let count = 1;
@@ -818,7 +880,8 @@ function parseTorsionOCR(text) {
       if (cand >= 1 && cand <= 9) count = cand;
     }
 
-    const lenMatch = line.match(/x\s+(\d+(?:[.,]\d+)?)\s*po/i);
+    // Extraire la longueur "x N po" — accepter aussi "x Npo" sans espace
+    const lenMatch = line.match(/x\s*(\d+(?:[.,]\d+)?)\s*po/i);
     const length = lenMatch ? parseFloat(lenMatch[1].replace(',', '.')) : null;
 
     if (isTube) {
@@ -1288,9 +1351,46 @@ function OCRCapture({ config, onExtract, show, setShow, accentColor }) {
                   ✓ Pillow block détecté
                 </div>
               )}
-              {debug.deduction && (
+              {debug.deduction && !debug.needsRowChoice && (
                 <div className="p-2.5 border border-sky-900/50 bg-sky-950/20 rounded text-xs text-sky-200/90">
                   <span className="font-mono text-sky-400">ℹ Déduction :</span> {debug.deduction}
+                </div>
+              )}
+              {debug.needsRowChoice && (
+                <div className="space-y-2">
+                  <div className="p-2.5 border border-sky-900/50 bg-sky-950/20 rounded text-xs text-sky-200/90">
+                    <span className="font-mono text-sky-400">ℹ Choix requis :</span> 5 lignes du tableau ont été lues, mais la flèche n'est pas claire. Choisissez la ligne correspondant à la flèche sur la feuille papier.
+                  </div>
+                  <div className="space-y-1">
+                    {debug.needsRowChoice.map((row, i) => (
+                      <button
+                        key={i}
+                        onClick={() => {
+                          // Construire les champs à appliquer en remplaçant Diametre/Maille/Long/Poids
+                          const merged = { ...extracted };
+                          if (row.diametre != null) merged.Diametre = row.diametre;
+                          if (row.maille != null) merged.Maille = row.maille;
+                          if (row.long != null) merged.Long = row.long;
+                          if (row.poidsRessort != null) merged.Poids = row.poidsRessort;
+                          delete merged._debug;
+                          onExtract(merged);
+                          reset();
+                        }}
+                        className={`w-full p-2.5 bg-neutral-900 border border-neutral-800 hover:${accentBorder} hover:bg-neutral-800/50 rounded text-left transition-colors`}
+                      >
+                        <div className="flex items-center justify-between">
+                          <span className={`font-mono text-sm ${accentText}`}>
+                            {row.diametre != null ? row.diametre.toLocaleString('fr-CA', { maximumFractionDigits: 3 }) + ' po' : '?'}
+                          </span>
+                          <span className="font-mono text-[10px] text-neutral-500">
+                            {row.long != null && `Long ${row.long.toLocaleString('fr-CA', { maximumFractionDigits: 1 })}`}
+                            {row.long != null && row.poidsRessort != null && ' · '}
+                            {row.poidsRessort != null && `Poids ${row.poidsRessort.toLocaleString('fr-CA', { maximumFractionDigits: 1 })}`}
+                          </span>
+                        </div>
+                      </button>
+                    ))}
+                  </div>
                 </div>
               )}
               {debug.incertain && (
@@ -1326,7 +1426,7 @@ function OCRCapture({ config, onExtract, show, setShow, accentColor }) {
                 <pre className="mt-2 p-2 bg-neutral-950 rounded whitespace-pre-wrap max-h-40 overflow-auto">{rawText}</pre>
               </details>
               <div className="flex gap-2">
-                {visibleFields.length > 0 && (
+                {visibleFields.length > 0 && !debug.needsRowChoice && (
                   <button
                     onClick={apply}
                     className={`flex-1 py-2.5 ${accentBg} text-neutral-50 font-mono text-xs uppercase tracking-widest rounded hover:brightness-110`}
