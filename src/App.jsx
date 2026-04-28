@@ -635,21 +635,30 @@ function parseTorsionOCR(text) {
     // Une ligne de tableau contient "G D" (peut être lu par OCR comme "GiDg", "GAD", etc.)
     // Avant: Diametre, Maille, Long. Après: Poids, Libre, Quant.
     const tableRows = [];
-    // G + 0-3 lettres + D + 0-2 lettres + séparateur + chiffre
-    // (exclut "GESTION DCG" grâce à l'exigence d'un chiffre après)
-    const gdRe = /G[a-zA-Z]{0,3}\s*D[a-zA-Z]{0,2}[\s;,:]+\d/;
+    // Détecter les lignes du tableau par présence de "G D" (avec tolérance OCR)
+    // 
+    // Le regex GD principal: G + 0-3 lettres + D + 0-2 lettres
+    // (matche "G D", "GD", "GiDg", "GAD", etc.)
+    //
+    // Pour exclure les faux positifs comme "GESTION DCG", on exige qu'il y ait
+    // au moins 1 nombre AVANT le GD dans la ligne (le diamètre, la maille, etc.)
+    //
+    // Note: on n'exige plus de chiffre APRÈS GD car parfois l'OCR rend le Poids
+    // comme une lettre (ex: PRO-TECH "GD à 37,8" où "à" remplace "31").
+    const gdRe = /\bG[a-zA-Z]{0,3}\s*D[a-zA-Z]{0,2}\b/;
 
     for (let i = 0; i < lines.length; i++) {
       const raw = lines[i];
       const gdMatch = raw.match(gdRe);
       if (!gdMatch) continue;
-
+      
+      // Filtre anti-GESTION-DCG: il faut au moins un nombre avant GD
       const before = raw.slice(0, gdMatch.index);
-      // Le regex GD consomme un chiffre à la fin (pour distinguer de "GESTION DCG").
-      // On le remet dans 'after' pour que la lecture des colonnes Poids/Libre/Quant
-      // retrouve la bonne valeur du poids unitaire.
-      const consumedDigit = gdMatch[0].match(/\d$/)?.[0] || '';
-      const after = consumedDigit + raw.slice(gdMatch.index + gdMatch[0].length);
+      const numbersBeforeGD = (before.match(/\d+(?:[,.]\d+)?/g) || []).length;
+      if (numbersBeforeGD < 1) continue;
+
+      // Plus de digit "consommé" car le regex ne capture plus de chiffre après
+      const after = raw.slice(gdMatch.index + gdMatch[0].length);
 
       // Tokeniser 'before' en gardant seulement les tokens numériques
       const beforeTokens = (before.match(/\S+/g) || []);
@@ -746,7 +755,12 @@ function parseTorsionOCR(text) {
       //       où les tirets sont suivis d'autres tirets (séparateurs de tableau).
       const arrowExplicit = /\d\s{1,3}<[-—=_\u2014\u2013\u2015]*\S*/;
       const arrowImplicit = /\d\s{1,3}[\u2014\u2013\u2015—\-]{1,3}\s+[A-Za-z\[\{\|\(]/;
-      const hasArrow = arrowExplicit.test(raw) || arrowImplicit.test(raw);
+      // Pattern 3: flèche complètement perdue par l'OCR mais collée au Quant.
+      // Cas PRO-TECH: "...2e ss" où le "<---" a été lu comme "e ss" attaché au "2".
+      // On exige un chiffre ISOLÉ (précédé d'espace) collé à une lettre, pour
+      // éviter les faux positifs comme "22a" (où 22 n'est pas un Quant typique).
+      const arrowGlued = /\s\d[a-zA-Z]/.test(after);
+      const hasArrow = arrowExplicit.test(raw) || arrowImplicit.test(raw) || arrowGlued;
 
       tableRows.push({
         diametre: diam,        // peut être null si OCR du diamètre illisible
@@ -853,7 +867,22 @@ function parseTorsionOCR(text) {
       // séparé — on ne multiplie PAS par NbRessorts, car la convention des
       // données d'entraînement est la même que celle de la saisie manuelle:
       // Poids = poids d'un ressort individuel.
-      if (chosen.poidsRessort != null && !isNaN(chosen.poidsRessort)) {
+      // Validation: si le Poids extrait est décimal mais que les autres lignes
+      // ont des Poids entiers, c'est probablement une erreur d'OCR (le parser
+      // a pris Libre à la place de Poids parce que Poids était illisible).
+      // Cas PRO-TECH: ligne flèche "GD à 37,8" → "à" = Poids manquant, "37,8" 
+      // est Libre. Le parser a pris 37.8 comme Poids à tort.
+      let trustPoids = true;
+      if (chosen.poidsRessort != null && !Number.isInteger(chosen.poidsRessort)) {
+        const otherPoids = tableRows
+          .filter(r => r !== chosen && r.poidsRessort != null && r.poidsRessort < 500)
+          .map(r => r.poidsRessort);
+        if (otherPoids.length >= 2 && otherPoids.every(p => Number.isInteger(p))) {
+          trustPoids = false;
+          result._debug.poidsSuspect = `Poids ${chosen.poidsRessort} suspect (décimal alors que les autres lignes ont des poids entiers). Vérifiez sur la feuille papier.`;
+        }
+      }
+      if (trustPoids && chosen.poidsRessort != null && !isNaN(chosen.poidsRessort)) {
         result.Poids = chosen.poidsRessort;
       }
     }
@@ -1396,6 +1425,11 @@ function OCRCapture({ config, onExtract, show, setShow, accentColor }) {
               {debug.incertain && (
                 <div className="p-2.5 border border-yellow-900/50 bg-yellow-950/20 rounded text-xs text-yellow-200/80">
                   <span className="font-mono text-yellow-500">⚠</span> {debug.incertain}. Vérifiez le diamètre choisi.
+                </div>
+              )}
+              {debug.poidsSuspect && (
+                <div className="p-2.5 border border-yellow-900/50 bg-yellow-950/20 rounded text-xs text-yellow-200/80">
+                  <span className="font-mono text-yellow-500">⚠ Poids non extrait :</span> {debug.poidsSuspect}
                 </div>
               )}
               {debug.note && (
