@@ -953,6 +953,15 @@ function parseTorsionOCR(text) {
   // === 3. Shafts — détection tolérante (sans exiger [N] en préfixe, sans
   //          word-boundaries — l'OCR colle parfois les mots, ex: 'Amrepleinix'
   //          au lieu de '[1]  Arbre plein x') ===
+  //
+  // Format des feuilles: "[N]  Tube|Arbre plein  M x L po."
+  //   N = nombre d'unités (count)
+  //   M = diamètre/taille du tube/arbre (typiquement 1 ou 1 1/4)
+  //   L = longueur en pouces
+  //
+  // On prend donc le DERNIER nombre AVANT le mot "Tube"/"Plein" comme count.
+  // Si l'OCR lit mal le N (ex: [1] lu comme [4]), il y a peu à faire — on
+  // accepte que l'utilisateur devra corriger sur les rares cas dégradés.
   let tubingCount = 0, pleinCount = 0, longShaft = null;
   for (const line of lines) {
     const lineL = line.toLowerCase();
@@ -961,7 +970,7 @@ function parseTorsionOCR(text) {
     const isPlein = /arbre\s*plein|plein/i.test(lineL);
     if (!isTube && !isPlein) continue;
 
-    // Nombre juste avant "Tube" ou "Plein" (chercher position du mot-clé)
+    // Position du mot-clé (Tube ou Arbre plein)
     const wordPos = lineL.search(/\btube\b|arbre\s*plein|plein/i);
     const beforeWord = line.slice(0, wordPos);
     const prefixNumbers = beforeWord.match(/\d+/g) || [];
@@ -987,6 +996,15 @@ function parseTorsionOCR(text) {
   result.Plein = pleinCount;
   result.NbShaft = tubingCount + pleinCount;
   if (longShaft) result.LongShaft = longShaft;
+
+  // Validation: si le nombre total de shafts est invraisemblablement élevé
+  // (typiquement 1-2 sur ces feuilles), c'est probablement une erreur d'OCR
+  // sur le préfixe [N]. Cas ALU SERVICE: [1] lu comme [4] → 4 shafts détectés
+  // pour une feuille qui n'a que 2 ressorts. On signale à l'utilisateur.
+  const totalShafts = tubingCount + pleinCount;
+  if (totalShafts > Math.max(2, result.NbRessorts || 1)) {
+    result._debug.shaftSuspect = `${totalShafts} shaft(s) détecté(s) — semble élevé pour ${result.NbRessorts || 1} ressort(s). Vérifiez la valeur sur la feuille papier (l'OCR confond parfois le chiffre [1] avec [4] ou [7]).`;
+  }
 
   // === 4. Pillow Block ===
   result.PillowBlock = /utilisez\s+des\s+pillow\s*block/i.test(text) ? 1 : 0;
@@ -1071,7 +1089,7 @@ export default function App() {
                 RESSORT<span className={mode === 'torsion' ? 'text-orange-500' : 'text-cyan-400'}>.</span>CALC
               </h1>
             </div>
-            <div className="font-mono text-[10px] text-neutral-500 uppercase tracking-widest">v2.0</div>
+            <div className="font-mono text-[10px] text-neutral-500 uppercase tracking-widest">v2.7</div>
           </div>
         </div>
 
@@ -1497,6 +1515,11 @@ function OCRCapture({ config, onExtract, show, setShow, accentColor }) {
               {debug.partialTable && (
                 <div className="p-2.5 border border-yellow-900/50 bg-yellow-950/20 rounded text-xs text-yellow-200/80">
                   <span className="font-mono text-yellow-500">⚠</span> {debug.partialTable}
+                </div>
+              )}
+              {debug.shaftSuspect && (
+                <div className="p-2.5 border border-yellow-900/50 bg-yellow-950/20 rounded text-xs text-yellow-200/80">
+                  <span className="font-mono text-yellow-500">⚠</span> {debug.shaftSuspect}
                 </div>
               )}
               {debug.note && (
