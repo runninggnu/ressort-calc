@@ -637,15 +637,15 @@ function parseTorsionOCR(text) {
     const tableRows = [];
     // Détecter les lignes du tableau par présence de "G D" (avec tolérance OCR)
     // 
-    // Le regex GD principal: G + 0-3 lettres + D + 0-2 lettres
-    // (matche "G D", "GD", "GiDg", "GAD", etc.)
+    // Le regex GD principal: G/C + 0-3 lettres + D + 0-2 lettres
+    // (matche "G D", "GD", "GiDg", "GAD", "CD" — l'OCR confond parfois G avec C)
     //
     // Pour exclure les faux positifs comme "GESTION DCG", on exige qu'il y ait
     // au moins 1 nombre AVANT le GD dans la ligne (le diamètre, la maille, etc.)
     //
     // Note: on n'exige plus de chiffre APRÈS GD car parfois l'OCR rend le Poids
     // comme une lettre (ex: PRO-TECH "GD à 37,8" où "à" remplace "31").
-    const gdRe = /\bG[a-zA-Z]{0,3}\s*D[a-zA-Z]{0,2}\b/;
+    const gdRe = /\b[GC][a-zA-Z]{0,3}\s*D[a-zA-Z]{0,2}\b/;
 
     for (let i = 0; i < lines.length; i++) {
       const raw = lines[i];
@@ -760,7 +760,11 @@ function parseTorsionOCR(text) {
       // On exige un chiffre ISOLÉ (précédé d'espace) collé à une lettre, pour
       // éviter les faux positifs comme "22a" (où 22 n'est pas un Quant typique).
       const arrowGlued = /\s\d[a-zA-Z]/.test(after);
-      const hasArrow = arrowExplicit.test(raw) || arrowImplicit.test(raw) || arrowGlued;
+      // Pattern 4: cas "2-8" en fin de ligne — le "<-" est lu comme un tiret simple
+      // entre Quant et un chiffre bruité. Ça arrive quand le `<` est totalement perdu.
+      // Ex: "...112,4 2-8" où "2-8" représente "2 <-(8)" avec 8 = bruit.
+      const arrowDashDigit = /\s\d[\u2014\u2013\u2015—\-]\d/.test(after);
+      const hasArrow = arrowExplicit.test(raw) || arrowImplicit.test(raw) || arrowGlued || arrowDashDigit;
 
       tableRows.push({
         diametre: diam,        // peut être null si OCR du diamètre illisible
@@ -776,20 +780,68 @@ function parseTorsionOCR(text) {
     }
 
     // === ASSIGNATION DES DIAMÈTRES PAR POSITION ===
-    // Si on a détecté pile 5 lignes G D, le diamètre de chaque ligne est déterminé
-    // par sa position (1 3/4, 2 5/8, 3 3/4, 5 1/4, 6,0 dans cet ordre fixe).
-    // Cette stratégie est plus robuste que de se fier à l'OCR du diamètre, qui
-    // peut être totalement illisible ("Le Lo :;, 90, GD" pour la ligne 1 3/4).
+    // Les 5 lignes du tableau ont toujours les diamètres dans l'ordre
+    // [1.75, 2.625, 3.75, 5.25, 6.0]. Si on détecte exactement 5 lignes, c'est
+    // facile (assignation directe). Sinon, on utilise les diamètres lisibles
+    // par OCR comme "ancres" pour inférer les positions des autres.
     const ALL_DIAMETRES = [1.75, 2.625, 3.75, 5.25, 6.0];
+    
     if (tableRows.length === 5) {
+      // Cas idéal: 5 lignes détectées → assignation directe par position
       tableRows.forEach((r, i) => {
-        // Si l'OCR a réussi à lire le diamètre ET il diffère de la position,
-        // on garde la position (plus fiable). On enregistre le désaccord pour debug.
         if (r.diamFromOCR != null && r.diamFromOCR !== ALL_DIAMETRES[i]) {
           r._diamConflict = `OCR=${r.diamFromOCR}, position=${ALL_DIAMETRES[i]}`;
         }
         r.diametre = ALL_DIAMETRES[i];
       });
+    } else if (tableRows.length >= 2 && tableRows.length < 5) {
+      // Cas partiel: on essaie d'inférer les positions à partir des diamètres OCR connus
+      const positions = new Array(tableRows.length).fill(null);
+      
+      // Étape 1: ancrer les lignes dont on connaît le diamètre
+      tableRows.forEach((r, i) => {
+        if (r.diamFromOCR != null) {
+          const pos = ALL_DIAMETRES.indexOf(r.diamFromOCR);
+          if (pos >= 0) positions[i] = pos;
+        }
+      });
+      
+      // Étape 2: vérifier que les ancres sont en ordre croissant (cohérence)
+      let coherent = true;
+      let lastPos = -1;
+      for (let i = 0; i < tableRows.length; i++) {
+        if (positions[i] !== null) {
+          if (positions[i] <= lastPos) { coherent = false; break; }
+          lastPos = positions[i];
+        }
+      }
+      
+      // Étape 3: combler les positions manquantes (la position prev+1)
+      if (coherent) {
+        for (let i = 0; i < tableRows.length; i++) {
+          if (positions[i] === null) {
+            let prevPos = -1, nextPos = 5;
+            for (let j = i - 1; j >= 0; j--) {
+              if (positions[j] !== null) { prevPos = positions[j]; break; }
+            }
+            for (let j = i + 1; j < tableRows.length; j++) {
+              if (positions[j] !== null) { nextPos = positions[j]; break; }
+            }
+            const candidate = prevPos + 1;
+            if (candidate < nextPos) positions[i] = candidate;
+            else { coherent = false; break; } // pas d'espace
+          }
+        }
+      }
+      
+      // Étape 4: si l'inférence est cohérente, l'appliquer
+      if (coherent) {
+        tableRows.forEach((r, i) => {
+          if (positions[i] !== null) {
+            r.diametre = ALL_DIAMETRES[positions[i]];
+          }
+        });
+      }
     }
 
     result._debug.tableRows = tableRows;
@@ -833,17 +885,20 @@ function parseTorsionOCR(text) {
       }
     }
 
-    // Fallback 3: 5 lignes détectées mais aucune flèche → AMBIGUÏTÉ
-    // On présente les 5 options à l'utilisateur dans l'interface plutôt que
+    // Fallback 3: 2+ lignes détectées mais aucune flèche claire → AMBIGUÏTÉ
+    // On présente toutes les options à l'utilisateur dans l'interface plutôt que
     // de choisir automatiquement (ce qui mènerait à un faux positif).
-    if (!chosen && tableRows.length === 5) {
+    if (!chosen && tableRows.length >= 2) {
       result._debug.needsRowChoice = tableRows.map(r => ({
         diametre: r.diametre,
         long: r.long,
         poidsRessort: r.poidsRessort,
         maille: r.maille,
       }));
-      result._debug.deduction = `5 lignes du tableau détectées mais la flèche de sélection n'a pas pu être lue. Choisissez la ligne correspondant à la flèche sur la feuille papier.`;
+      const detail = tableRows.length === 5
+        ? 'Les 5 lignes du tableau ont été lues, mais la flèche de sélection n\'a pas pu être lue.'
+        : `${tableRows.length} ligne(s) du tableau lue(s) sur 5, et la flèche n'a pas été identifiée.`;
+      result._debug.deduction = `${detail} Choisissez la ligne correspondant à la flèche sur la feuille papier.`;
     }
 
     // Fallback 4: si UNE seule ligne a quant>0, c'est elle
@@ -884,6 +939,13 @@ function parseTorsionOCR(text) {
       }
       if (trustPoids && chosen.poidsRessort != null && !isNaN(chosen.poidsRessort)) {
         result.Poids = chosen.poidsRessort;
+      }
+      
+      // Avertissement supplémentaire: si la flèche a été détectée mais qu'on a moins
+      // de 5 lignes lues (OCR partiel), il y a un risque que les valeurs Poids/Long 
+      // de la ligne flèche soient erronées (cas TREMBLAY: Poids=19 lu comme 49).
+      if (tableRows.length < 5 && !result._debug.poidsSuspect && !result._debug.deduction) {
+        result._debug.partialTable = `OCR partiel : seulement ${tableRows.length} ligne(s) du tableau ont été lues sur 5. Vérifiez visuellement les valeurs Diamètre, Long et Poids extraites.`;
       }
     }
   }
@@ -1430,6 +1492,11 @@ function OCRCapture({ config, onExtract, show, setShow, accentColor }) {
               {debug.poidsSuspect && (
                 <div className="p-2.5 border border-yellow-900/50 bg-yellow-950/20 rounded text-xs text-yellow-200/80">
                   <span className="font-mono text-yellow-500">⚠ Poids non extrait :</span> {debug.poidsSuspect}
+                </div>
+              )}
+              {debug.partialTable && (
+                <div className="p-2.5 border border-yellow-900/50 bg-yellow-950/20 rounded text-xs text-yellow-200/80">
+                  <span className="font-mono text-yellow-500">⚠</span> {debug.partialTable}
                 </div>
               )}
               {debug.note && (
