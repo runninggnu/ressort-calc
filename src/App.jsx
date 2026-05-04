@@ -430,21 +430,35 @@ async function preprocessImage(file) {
 async function runOCR(imageFile, onProgress) {
   // Prétraiter l'image AVANT d'envoyer à Tesseract — améliore dramatiquement
   // la qualité OCR sur photos de téléphone (seuillage adaptatif compense
-  // les variations d'éclairage)
-  let processed;
+  // les variations d'éclairage).
+  // 
+  // Si le prétraitement échoue (HEIC non supporté par <Image>, canvas trop
+  // gros, toBlob retourne null sur iOS, etc.), on retombe sur l'image brute
+  // pour ne pas casser le scan.
+  let processed = null;
+  let preprocessingSucceeded = false;
   try {
     processed = await preprocessImage(imageFile);
+    if (processed && processed.size > 0) {
+      preprocessingSucceeded = true;
+    } else {
+      console.warn('Prétraitement: blob vide/null, fallback sur image brute');
+      processed = null;
+    }
   } catch (e) {
-    // Si le prétraitement échoue pour une raison ou une autre, on tombe sur l'image originale
     console.warn('Prétraitement échoué, utilisation de l\'image brute:', e);
-    processed = imageFile;
   }
+
+  // Fallback sur l'image originale si le prétraitement n'a pas marché
+  if (!processed) processed = imageFile;
 
   const Tesseract = await loadTesseract();
   const { data } = await Tesseract.recognize(processed, 'fra+eng', {
     logger: m => { if (m.status === 'recognizing text' && onProgress) onProgress(m.progress); },
   });
-  return data.text;
+  // Retour avec le texte ET un drapeau indiquant si le prétraitement a marché.
+  // L'UI peut l'afficher pour aider au diagnostic.
+  return { text: data.text, preprocessed: preprocessingSucceeded };
 }
 
 // Extraction par mots-clés dans le texte OCR (pour les cas où le format exact
@@ -1089,7 +1103,7 @@ export default function App() {
                 RESSORT<span className={mode === 'torsion' ? 'text-orange-500' : 'text-cyan-400'}>.</span>CALC
               </h1>
             </div>
-            <div className="font-mono text-[10px] text-neutral-500 uppercase tracking-widest">v2.7</div>
+            <div className="font-mono text-[10px] text-neutral-500 uppercase tracking-widest">v2.8</div>
           </div>
         </div>
 
@@ -1326,6 +1340,7 @@ function OCRCapture({ config, onExtract, show, setShow, accentColor }) {
   const [status, setStatus] = useState('idle'); // idle | loading | ocr | done | error
   const [progress, setProgress] = useState(0);
   const [rawText, setRawText] = useState('');
+  const [preprocessed, setPreprocessed] = useState(false);
   const [extracted, setExtracted] = useState(null);
   const [imagePreview, setImagePreview] = useState(null);
   const [error, setError] = useState('');
@@ -1344,8 +1359,9 @@ function OCRCapture({ config, onExtract, show, setShow, accentColor }) {
     setImagePreview(URL.createObjectURL(file));
     try {
       setStatus('ocr');
-      const text = await runOCR(file, p => setProgress(p));
+      const { text, preprocessed } = await runOCR(file, p => setProgress(p));
       setRawText(text);
+      setPreprocessed(preprocessed);
       const fields = extractFromOCR(text, config);
       setExtracted(fields);
       setStatus('done');
@@ -1360,6 +1376,7 @@ function OCRCapture({ config, onExtract, show, setShow, accentColor }) {
     setStatus('idle');
     setProgress(0);
     setRawText('');
+    setPreprocessed(false);
     setExtracted(null);
     setImagePreview(null);
     setError('');
@@ -1529,8 +1546,13 @@ function OCRCapture({ config, onExtract, show, setShow, accentColor }) {
               )}
 
               <div>
-                <div className="font-mono text-[10px] uppercase tracking-widest text-neutral-500 mb-2">
-                  Champs extraits ({visibleFields.length})
+                <div className="flex items-center justify-between mb-2">
+                  <div className="font-mono text-[10px] uppercase tracking-widest text-neutral-500">
+                    Champs extraits ({visibleFields.length})
+                  </div>
+                  <div className={`font-mono text-[9px] uppercase tracking-widest px-1.5 py-0.5 rounded border ${preprocessed ? 'border-green-700 text-green-500 bg-green-950/30' : 'border-neutral-700 text-neutral-500 bg-neutral-900'}`}>
+                    {preprocessed ? '✓ image améliorée' : 'image brute'}
+                  </div>
                 </div>
                 {visibleFields.length === 0 ? (
                   <div className="text-xs text-yellow-500 font-mono">Aucun champ reconnu automatiquement.</div>
