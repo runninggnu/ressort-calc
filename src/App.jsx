@@ -1026,8 +1026,11 @@ function parseTorsionOCR(text) {
       if (length && !longShaft) longShaft = length;
     }
   }
-  result.Tubing = tubingCount;
-  result.Plein = pleinCount;
+  // Tubing et Plein sont des indicateurs BINAIRES (0/1) dans le modèle initial,
+  // mutuellement exclusifs: c'est SOIT du tubing SOIT un arbre plein.
+  // NbShaft est le nombre total d'unités (peut être 1, 2, etc.).
+  result.Tubing = tubingCount > 0 ? 1 : 0;
+  result.Plein = pleinCount > 0 ? 1 : 0;
   result.NbShaft = tubingCount + pleinCount;
   if (longShaft) result.LongShaft = longShaft;
 
@@ -1123,7 +1126,7 @@ export default function App() {
                 RESSORT<span className={mode === 'torsion' ? 'text-orange-500' : 'text-cyan-400'}>.</span>CALC
               </h1>
             </div>
-            <div className="font-mono text-[10px] text-neutral-500 uppercase tracking-widest">v2.9</div>
+            <div className="font-mono text-[10px] text-neutral-500 uppercase tracking-widest">v3.0</div>
           </div>
         </div>
 
@@ -1224,18 +1227,29 @@ function TorsionPredictView({ inputs, updateInput, model, prediction, similar })
         <Field label="Maille">
           <NumberInput value={inputs.Maille} onChange={v => updateInput('Maille', v)} min={1000} step={1} />
         </Field>
-        <Field label="Nombre de shafts">
-          <SegmentedControl value={inputs.NbShaft} options={[0, 1, 2]} onChange={v => updateInput('NbShaft', v)} accent="orange" />
+        <Field label="Type de shaft">
+          <SegmentedControl
+            value={inputs.Tubing === 1 ? 'tubing' : (inputs.Plein === 1 ? 'plein' : 'aucun')}
+            options={['tubing', 'plein', 'aucun']}
+            labels={['Tubing', 'Arbre plein', 'Aucun']}
+            onChange={v => {
+              if (v === 'tubing')      { updateInput('Tubing', 1); updateInput('Plein', 0); if (inputs.NbShaft === 0) updateInput('NbShaft', 1); }
+              else if (v === 'plein')  { updateInput('Tubing', 0); updateInput('Plein', 1); if (inputs.NbShaft === 0) updateInput('NbShaft', 1); }
+              else                     { updateInput('Tubing', 0); updateInput('Plein', 0); updateInput('NbShaft', 0); }
+            }}
+            accent="orange"
+          />
         </Field>
-        <Field label="Shafts tubing (nb)">
-          <SegmentedControl value={inputs.Tubing} options={[0, 1, 2, 3]} onChange={v => updateInput('Tubing', v)} accent="orange" />
-        </Field>
-        <Field label="Shafts pleins (nb)">
-          <SegmentedControl value={inputs.Plein} options={[0, 1, 2]} onChange={v => updateInput('Plein', v)} accent="orange" />
-        </Field>
-        <Field label="Longueur shaft" unit="po">
-          <NumberInput value={inputs.LongShaft} onChange={v => updateInput('LongShaft', v)} min={1} step={1} />
-        </Field>
+        {(inputs.Tubing === 1 || inputs.Plein === 1) && (
+          <>
+            <Field label="Nombre de shafts">
+              <SegmentedControl value={inputs.NbShaft} options={[1, 2, 3]} onChange={v => updateInput('NbShaft', v)} accent="orange" />
+            </Field>
+            <Field label="Longueur shaft" unit="po">
+              <NumberInput value={inputs.LongShaft} onChange={v => updateInput('LongShaft', v)} min={1} step={1} />
+            </Field>
+          </>
+        )}
         <Field label="Pillow block">
           <SegmentedControl value={inputs.PillowBlock} options={[0, 1]} labels={['Non', 'Oui']} onChange={v => updateInput('PillowBlock', v)} accent="orange" />
         </Field>
@@ -1568,7 +1582,12 @@ function OCRCapture({ config, onExtract, show, setShow, accentColor }) {
               <div>
                 <div className="flex items-center justify-between mb-2">
                   <div className="font-mono text-[10px] uppercase tracking-widest text-neutral-500">
-                    Champs extraits ({visibleFields.length})
+                    Champs extraits ({(() => {
+                      // Compter en fusionnant Tubing/Plein en un seul "Type"
+                      const reduced = visibleFields.filter(([k]) => k !== 'Tubing' && k !== 'Plein');
+                      const hasShaftType = visibleFields.some(([k, v]) => (k === 'Tubing' || k === 'Plein') && v === 1);
+                      return reduced.length + (hasShaftType ? 1 : 0);
+                    })()})
                   </div>
                   <div className={`font-mono text-[9px] uppercase tracking-widest px-1.5 py-0.5 rounded border ${preprocessed ? 'border-green-700 text-green-500 bg-green-950/30' : 'border-neutral-700 text-neutral-500 bg-neutral-900'}`}>
                     {preprocessed ? '✓ image améliorée' : 'image brute'}
@@ -1576,16 +1595,29 @@ function OCRCapture({ config, onExtract, show, setShow, accentColor }) {
                 </div>
                 {visibleFields.length === 0 ? (
                   <div className="text-xs text-yellow-500 font-mono">Aucun champ reconnu automatiquement.</div>
-                ) : (
-                  <div className="space-y-1">
-                    {visibleFields.map(([k, v]) => (
-                      <div key={k} className="flex justify-between font-mono text-xs py-1 border-b border-neutral-800">
-                        <span className="text-neutral-400">{k}</span>
-                        <span className={accentText}>{typeof v === 'number' ? v.toLocaleString('fr-CA', { maximumFractionDigits: 2 }) : v}</span>
-                      </div>
-                    ))}
-                  </div>
-                )}
+                ) : (() => {
+                  // Affichage compact: ligne "Type" qui combine Tubing/Plein, suppression des binaires bruts
+                  const tubingVal = extracted.Tubing;
+                  const pleinVal = extracted.Plein;
+                  const typeLabel = tubingVal === 1 ? 'Tubing' : (pleinVal === 1 ? 'Arbre plein' : null);
+                  const shownFields = visibleFields.filter(([k]) => k !== 'Tubing' && k !== 'Plein');
+                  return (
+                    <div className="space-y-1">
+                      {typeLabel && (
+                        <div className="flex justify-between font-mono text-xs py-1 border-b border-neutral-800">
+                          <span className="text-neutral-400">Type de shaft</span>
+                          <span className={accentText}>{typeLabel}</span>
+                        </div>
+                      )}
+                      {shownFields.map(([k, v]) => (
+                        <div key={k} className="flex justify-between font-mono text-xs py-1 border-b border-neutral-800">
+                          <span className="text-neutral-400">{k}</span>
+                          <span className={accentText}>{typeof v === 'number' ? v.toLocaleString('fr-CA', { maximumFractionDigits: 2 }) : v}</span>
+                        </div>
+                      ))}
+                    </div>
+                  );
+                })()}
               </div>
               <details className="font-mono text-[10px] text-neutral-500">
                 <summary className="cursor-pointer hover:text-neutral-300">Voir le texte brut reconnu</summary>
