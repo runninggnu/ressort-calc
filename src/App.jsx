@@ -570,11 +570,28 @@ function parseTorsionDiametre(s) {
 
 function parseTorsionMaille(s) {
   if (!s) return null;
-  s = String(s).trim().replace(/^[,.]/, '').replace(',', '.').replace(/[^0-9.]/g, '');
-  const n = parseFloat(s);
+  const cleaned = String(s).trim().replace(/^[,.]/, '').replace(',', '.').replace(/[^0-9.]/g, '');
+  const n = parseFloat(cleaned);
   if (isNaN(n)) return null;
   if (n > 0 && n < 1) return Math.round(n * 10000);
-  return Math.round(n);
+  const rounded = Math.round(n);
+  // Tolérance OCR: le nombre est dans la plage attendue → on l'accepte tel quel
+  if (rounded >= 1800 && rounded <= 5500) return rounded;
+  // Tolérances OCR sur les nombres à 5 chiffres:
+  //   "27300" lu pour "2730" (zéro parasite à la fin)
+  //   "12437" lu pour "2437" (1 parasite au début, ex: "[2437" lu mal)
+  const digits = cleaned.replace(/\./g, '');
+  if (digits.length === 5) {
+    if (digits.endsWith('0')) {
+      const t = parseInt(digits.slice(0, 4));
+      if (!isNaN(t) && t >= 1800 && t <= 5500) return t;
+    }
+    if (digits.startsWith('1')) {
+      const t = parseInt(digits.slice(1));
+      if (!isNaN(t) && t >= 1800 && t <= 5500) return t;
+    }
+  }
+  return rounded;  // retour valeur même hors plage (la vérification isPlausibleMaille filtrera)
 }
 
 function isPlausibleMaille(n) { return n >= 1800 && n <= 5500; }
@@ -744,8 +761,12 @@ function parseTorsionOCR(text) {
         // C'est le cas HUDON "Le Lo :;, 90, GD 40 84 1 fer" où l'OCR a massacré
         // tout le début mais G D est bien là.
         // On essaie quand même d'extraire Long depuis le 1er token plausible.
+        // IMPORTANT: exclure les tokens qui sont eux-mêmes des diamètres canoniques
+        // (cas "258" qui est 2 5/8 et NON 25.8 po de Long — sans cette garde le
+        // parser confondrait le diamètre avec le Long quand la maille est mal lue).
         if (maille == null) {
           for (const t of numericTokens) {
+            if (parseTorsionDiametre(t) != null) continue;  // skip diamètres canoniques
             const l = parseLongValue(t);
             if (l != null) { long = l; break; }
           }
@@ -929,7 +950,22 @@ function parseTorsionOCR(text) {
 
     if (chosen) {
       result.Diametre = chosen.diametre;
-      if (chosen.maille != null) result.Maille = chosen.maille;
+      // Maille de la ligne choisie. Si manquante (OCR raté sur la ligne flèche),
+      // fallback sur la valeur la plus fréquente parmi les autres lignes — la
+      // maille est presque toujours constante dans tout le tableau.
+      if (chosen.maille != null) {
+        result.Maille = chosen.maille;
+      } else {
+        const otherMailles = tableRows
+          .filter(r => r !== chosen && r.maille != null)
+          .map(r => r.maille);
+        if (otherMailles.length > 0) {
+          const counts = {};
+          otherMailles.forEach(m => counts[m] = (counts[m] || 0) + 1);
+          const modal = Object.keys(counts).sort((a, b) => counts[b] - counts[a])[0];
+          if (modal) result.Maille = parseInt(modal);
+        }
+      }
       if (chosen.long != null) result.Long = chosen.long;
       // Le Poids est le poids UNITAIRE du ressort (tel qu'écrit dans la colonne
       // "Poids" du tableau de la feuille). Le nombre de ressorts est un champ
@@ -1126,7 +1162,7 @@ export default function App() {
                 RESSORT<span className={mode === 'torsion' ? 'text-orange-500' : 'text-cyan-400'}>.</span>CALC
               </h1>
             </div>
-            <div className="font-mono text-[10px] text-neutral-500 uppercase tracking-widest">v3.0</div>
+            <div className="font-mono text-[10px] text-neutral-500 uppercase tracking-widest">v3.1</div>
           </div>
         </div>
 
