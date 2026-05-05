@@ -988,14 +988,34 @@ function parseTorsionOCR(text) {
     const wordPos = lineL.search(/\btube\b|arbre\s*plein|plein/i);
     const beforeWord = line.slice(0, wordPos);
     const prefixNumbers = beforeWord.match(/\d+/g) || [];
+    
+    // Détermination du count avec récupération OCR.
+    // L'OCR confond souvent le crochet ouvrant '[' avec un '1' collé au chiffre,
+    // donc '[2] Arbre plein' devient '12 Arbre plein'. On gère ce cas:
+    // 1. D'abord chercher un nombre simple 1-9 (cas idéal: [1], [2], [3])
+    // 2. Sinon, chercher un nombre 10-19 et prendre son 2ème digit
+    //    ('12' → 2, '13' → 3, etc. — le '1' initial est probablement '[' OCRisé)
+    // 3. Sinon, count = 1 par défaut (cas 'Amrepleinix' où le préfixe est perdu)
     let count = 1;
-    if (prefixNumbers.length > 0) {
-      const cand = parseInt(prefixNumbers[prefixNumbers.length - 1]);
-      if (cand >= 1 && cand <= 9) count = cand;
+    let candFound = null;
+    for (const numStr of prefixNumbers) {
+      const n = parseInt(numStr);
+      if (n >= 1 && n <= 9) { candFound = n; break; }
     }
+    if (candFound == null) {
+      for (const numStr of prefixNumbers) {
+        const n = parseInt(numStr);
+        if (n >= 11 && n <= 19) {
+          const lastDigit = n - 10;
+          if (lastDigit >= 1 && lastDigit <= 9) { candFound = lastDigit; break; }
+        }
+      }
+    }
+    if (candFound != null) count = candFound;
 
-    // Extraire la longueur "x N po" — accepter aussi "x Npo" sans espace
-    const lenMatch = line.match(/x\s*(\d+(?:[.,]\d+)?)\s*po/i);
+    // Extraire la longueur "x N po" — accepter aussi "x Npo" sans espace,
+    // et "p0" (le 'o' de 'po' lu comme zéro par OCR — cas INST PCP "105p0").
+    const lenMatch = line.match(/x\s*(\d+(?:[.,]\d+)?)\s*p[o0]/i);
     const length = lenMatch ? parseFloat(lenMatch[1].replace(',', '.')) : null;
 
     if (isTube) {
@@ -1103,7 +1123,7 @@ export default function App() {
                 RESSORT<span className={mode === 'torsion' ? 'text-orange-500' : 'text-cyan-400'}>.</span>CALC
               </h1>
             </div>
-            <div className="font-mono text-[10px] text-neutral-500 uppercase tracking-widest">v2.8</div>
+            <div className="font-mono text-[10px] text-neutral-500 uppercase tracking-widest">v2.9</div>
           </div>
         </div>
 
