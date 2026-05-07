@@ -1026,12 +1026,17 @@ function parseTorsionOCR(text) {
     const prefixNumbers = beforeWord.match(/\d+/g) || [];
     
     // Détermination du count avec récupération OCR.
-    // L'OCR confond souvent le crochet ouvrant '[' avec un '1' collé au chiffre,
-    // donc '[2] Arbre plein' devient '12 Arbre plein'. On gère ce cas:
+    // L'OCR confond souvent les crochets avec des chiffres '1':
+    //   - '[' lu comme '1' au début → '[2]' devient '12' (pattern '1N')
+    //   - ']' lu comme '1' à la fin → '[2]' devient '21' (pattern 'N1')
+    //   - les deux → '[2]' devient '121' (pattern '1N1')
+    //
+    // Algorithme de récupération:
     // 1. D'abord chercher un nombre simple 1-9 (cas idéal: [1], [2], [3])
-    // 2. Sinon, chercher un nombre 10-19 et prendre son 2ème digit
-    //    ('12' → 2, '13' → 3, etc. — le '1' initial est probablement '[' OCRisé)
-    // 3. Sinon, count = 1 par défaut (cas 'Amrepleinix' où le préfixe est perdu)
+    // 2. Sinon, chercher un nombre 11-19 et prendre le 2ème digit (cas '1N')
+    // 3. Sinon, chercher un nombre 21-99 finissant par 1, prendre le 1er digit (cas 'N1')
+    // 4. Sinon, chercher un nombre 101-919 du forme '1N1', prendre le digit du milieu
+    // 5. Sinon, count = 1 par défaut (cas 'Amrepleinix' où le préfixe est perdu)
     let count = 1;
     let candFound = null;
     for (const numStr of prefixNumbers) {
@@ -1041,9 +1046,20 @@ function parseTorsionOCR(text) {
     if (candFound == null) {
       for (const numStr of prefixNumbers) {
         const n = parseInt(numStr);
+        // Pattern '1N': '[' lu comme '1' au début
         if (n >= 11 && n <= 19) {
           const lastDigit = n - 10;
           if (lastDigit >= 1 && lastDigit <= 9) { candFound = lastDigit; break; }
+        }
+        // Pattern 'N1': ']' lu comme '1' à la fin
+        if (n >= 21 && n <= 91 && n % 10 === 1) {
+          const firstDigit = Math.floor(n / 10);
+          if (firstDigit >= 1 && firstDigit <= 9) { candFound = firstDigit; break; }
+        }
+        // Pattern '1N1': les deux crochets lus comme '1' (ex: '121' pour '[2]')
+        if (n >= 101 && n <= 919 && Math.floor(n / 100) === 1 && n % 10 === 1) {
+          const middleDigit = Math.floor((n / 10) % 10);
+          if (middleDigit >= 1 && middleDigit <= 9) { candFound = middleDigit; break; }
         }
       }
     }
@@ -1162,7 +1178,7 @@ export default function App() {
                 RESSORT<span className={mode === 'torsion' ? 'text-orange-500' : 'text-cyan-400'}>.</span>CALC
               </h1>
             </div>
-            <div className="font-mono text-[10px] text-neutral-500 uppercase tracking-widest">v3.1</div>
+            <div className="font-mono text-[10px] text-neutral-500 uppercase tracking-widest">v3.2</div>
           </div>
         </div>
 
