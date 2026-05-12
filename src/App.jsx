@@ -668,25 +668,34 @@ function parseTorsionOCR(text) {
     const tableRows = [];
     // Détecter les lignes du tableau par présence de "G D" (avec tolérance OCR)
     // 
-    // Le regex GD principal: G/C + 0-3 lettres + D + 0-2 lettres
-    // (matche "G D", "GD", "GiDg", "GAD", "CD" — l'OCR confond parfois G avec C)
+    // Le regex GD principal accepte plusieurs variantes OCR fréquentes:
+    //   - 1er caractère: G/C/S/6 (G confondu avec C, S, ou un 6 — boucle ouverte)
+    //   - 2e caractère: D/O/0 (D confondu avec O ou un zéro — formes arrondies)
+    //   - case-insensitive: catche les minuscules ("gd", "co", "sd", "6o", etc.)
+    //   - lettres intercalées entre G et D ("GiDg", "GAD", etc.)
     //
-    // Pour exclure les faux positifs comme "GESTION DCG", on exige qu'il y ait
-    // au moins 1 nombre AVANT le GD dans la ligne (le diamètre, la maille, etc.)
+    // Exemples couverts: GD CD SD 6D gd cd sd 6d GO CO SO 6O go co so 6o G0 etc.
     //
-    // Note: on n'exige plus de chiffre APRÈS GD car parfois l'OCR rend le Poids
-    // comme une lettre (ex: PRO-TECH "GD à 37,8" où "à" remplace "31").
-    const gdRe = /\b[GC][a-zA-Z]{0,3}\s*D[a-zA-Z]{0,2}\b/;
+    // Pour exclure les faux positifs comme "GESTION DCG" ou "Coupe-froid", on exige
+    // qu'il y ait au moins 1 nombre AVANT le GD dans la ligne (le diamètre, la maille,
+    // etc.) — sinon une simple ligne de texte avec "co" matcherait.
+    const gdRe = /\b[GCS6][a-zA-Z]{0,3}\s*[D0O][a-zA-Z]{0,2}\b/i;
 
     for (let i = 0; i < lines.length; i++) {
       const raw = lines[i];
       const gdMatch = raw.match(gdRe);
       if (!gdMatch) continue;
       
-      // Filtre anti-GESTION-DCG: il faut au moins un nombre avant GD
+      // Filtre anti-faux-positifs: il faut au moins 1 nombre AVANT "GD" (exclut
+      // "GESTION DCG" etc) ET au moins 3 nombres au TOTAL dans la ligne (une
+      // vraie ligne de tableau a au moins diam + maille + long + poids).
+      // Cela exclut des faux positifs comme "P T par ressort 43 Angle :0 degrés"
+      // où "sort" matche le regex étendu mais la ligne n'a que 2 nombres.
       const before = raw.slice(0, gdMatch.index);
       const numbersBeforeGD = (before.match(/\d+(?:[,.]\d+)?/g) || []).length;
+      const numbersInLine = (raw.match(/\d+(?:[,.]\d+)?/g) || []).length;
       if (numbersBeforeGD < 1) continue;
+      if (numbersInLine < 3) continue;
 
       // Plus de digit "consommé" car le regex ne capture plus de chiffre après
       const after = raw.slice(gdMatch.index + gdMatch[0].length);
@@ -792,9 +801,10 @@ function parseTorsionOCR(text) {
       const arrowImplicit = /\d\s{1,3}[\u2014\u2013\u2015—\-]{1,3}\s+[A-Za-z\[\{\|\(]/;
       // Pattern 3: flèche complètement perdue par l'OCR mais collée au Quant.
       // Cas PRO-TECH: "...2e ss" où le "<---" a été lu comme "e ss" attaché au "2".
-      // On exige un chiffre ISOLÉ (précédé d'espace) collé à une lettre, pour
-      // éviter les faux positifs comme "22a" (où 22 n'est pas un Quant typique).
-      const arrowGlued = /\s\d[a-zA-Z]/.test(after);
+      // On exige un chiffre ISOLÉ (précédé d'espace) collé à une lettre, ET qu'il
+      // n'y ait PAS d'autres chiffres après — sinon on capte des faux positifs en
+      // milieu de ligne comme "co 1M 72,2..." où "1M" est juste un Poids mal lu.
+      const arrowGlued = /\s\d[a-zA-Z][^0-9]*$/.test(after);
       // Pattern 4: cas "2-8" en fin de ligne — le "<-" est lu comme un tiret simple
       // entre Quant et un chiffre bruité. Ça arrive quand le `<` est totalement perdu.
       // Ex: "...112,4 2-8" où "2-8" représente "2 <-(8)" avec 8 = bruit.
@@ -950,12 +960,33 @@ function parseTorsionOCR(text) {
 
     if (chosen) {
       result.Diametre = chosen.diametre;
-      // Maille de la ligne choisie. Si manquante (OCR raté sur la ligne flèche),
-      // fallback sur la valeur la plus fréquente parmi les autres lignes — la
-      // maille est presque toujours constante dans tout le tableau.
+      // Maille: on calcule la maille modale parmi TOUTES les lignes (pas juste
+      // les autres). Si la ligne choisie a une maille qui dévie de la modale
+      // (cas où l'OCR a confondu un diamètre avec une maille — ex: "2588" lu
+      // comme maille alors que c'est "2 5/8" mangled), on utilise la modale.
+      // La maille est presque toujours constante dans tout le tableau.
+      const allMailles = tableRows.filter(r => r.maille != null).map(r => r.maille);
+      let modalMaille = null;
+      if (allMailles.length > 0) {
+        const counts = {};
+        allMailles.forEach(m => counts[m] = (counts[m] || 0) + 1);
+        const sorted = Object.entries(counts).sort((a, b) => b[1] - a[1]);
+        // On exige au moins 2 votes pour faire confiance à la modale
+        if (sorted[0] && sorted[0][1] >= 2) {
+          modalMaille = parseInt(sorted[0][0]);
+        }
+      }
       if (chosen.maille != null) {
-        result.Maille = chosen.maille;
+        // Si la modale a >=2 votes et diffère du choisi, préférer la modale
+        if (modalMaille != null && chosen.maille !== modalMaille) {
+          result.Maille = modalMaille;
+        } else {
+          result.Maille = chosen.maille;
+        }
+      } else if (modalMaille != null) {
+        result.Maille = modalMaille;
       } else {
+        // Fallback simple sur autres lignes (au cas où)
         const otherMailles = tableRows
           .filter(r => r !== chosen && r.maille != null)
           .map(r => r.maille);
@@ -985,6 +1016,19 @@ function parseTorsionOCR(text) {
         if (otherPoids.length >= 2 && otherPoids.every(p => Number.isInteger(p))) {
           trustPoids = false;
           result._debug.poidsSuspect = `Poids ${chosen.poidsRessort} suspect (décimal alors que les autres lignes ont des poids entiers). Vérifiez sur la feuille papier.`;
+        }
+      }
+      // Détection de Poids tronqué par OCR: cas où la ligne flèche a un Poids 
+      // à 1 chiffre (1-9) mais qu'au moins une autre ligne a un Poids à 2 chiffres.
+      // Cas PRO-TECH 9405-5787: ligne flèche "GD 3% - 9e" → 39 lu comme 3.
+      if (trustPoids && chosen.poidsRessort != null && chosen.poidsRessort >= 1 && chosen.poidsRessort <= 9) {
+        const otherPoids = tableRows
+          .filter(r => r !== chosen && r.poidsRessort != null)
+          .map(r => r.poidsRessort);
+        const otherHas2Digit = otherPoids.some(p => p >= 10);
+        if (otherHas2Digit) {
+          trustPoids = false;
+          result._debug.poidsSuspect = `Poids ${chosen.poidsRessort} probablement tronqué par l'OCR (les autres lignes ont des poids à 2 chiffres). Saisissez-le manuellement depuis la feuille papier.`;
         }
       }
       if (trustPoids && chosen.poidsRessort != null && !isNaN(chosen.poidsRessort)) {
@@ -1083,17 +1127,24 @@ function parseTorsionOCR(text) {
   // NbShaft est le nombre total d'unités (peut être 1, 2, etc.).
   result.Tubing = tubingCount > 0 ? 1 : 0;
   result.Plein = pleinCount > 0 ? 1 : 0;
-  result.NbShaft = tubingCount + pleinCount;
-  if (longShaft) result.LongShaft = longShaft;
 
-  // Validation: si le nombre total de shafts est invraisemblablement élevé
-  // (typiquement 1-2 sur ces feuilles), c'est probablement une erreur d'OCR
-  // sur le préfixe [N]. Cas ALU SERVICE: [1] lu comme [4] → 4 shafts détectés
-  // pour une feuille qui n'a que 2 ressorts. On signale à l'utilisateur.
+  // NbShaft: total des unités. Si la somme dépasse un seuil plausible 
+  // (typiquement max 2 sur ces feuilles), c'est presque toujours une erreur 
+  // d'OCR sur le préfixe [N]. On limite alors à max(2, NbRessorts) et on 
+  // signale l'auto-correction à l'utilisateur.
+  // Cas connus: 
+  //   - "[1]" lu comme "[4]" (ALU SERVICE) → 4 corrigé à 2
+  //   - "[2]" lu comme "3" (PRO-TECH 9405-5787 v3) → 3 corrigé à 2
   const totalShafts = tubingCount + pleinCount;
-  if (totalShafts > Math.max(2, result.NbRessorts || 1)) {
-    result._debug.shaftSuspect = `${totalShafts} shaft(s) détecté(s) — semble élevé pour ${result.NbRessorts || 1} ressort(s). Vérifiez la valeur sur la feuille papier (l'OCR confond parfois le chiffre [1] avec [4] ou [7]).`;
+  const ressortBased = result.NbRessorts || 1;
+  const plausibleCap = Math.max(2, ressortBased);
+  if (totalShafts > plausibleCap) {
+    result.NbShaft = plausibleCap;
+    result._debug.shaftSuspect = `Compte de shafts détecté (${totalShafts}) trop élevé pour ${ressortBased} ressort(s) — limité automatiquement à ${plausibleCap}. Vérifiez la valeur sur la feuille papier (l'OCR confond parfois [1], [2] avec d'autres chiffres).`;
+  } else {
+    result.NbShaft = totalShafts;
   }
+  if (longShaft) result.LongShaft = longShaft;
 
   // === 4. Pillow Block ===
   result.PillowBlock = /utilisez\s+des\s+pillow\s*block/i.test(text) ? 1 : 0;
@@ -1178,7 +1229,7 @@ export default function App() {
                 RESSORT<span className={mode === 'torsion' ? 'text-orange-500' : 'text-cyan-400'}>.</span>CALC
               </h1>
             </div>
-            <div className="font-mono text-[10px] text-neutral-500 uppercase tracking-widest">v3.2</div>
+            <div className="font-mono text-[10px] text-neutral-500 uppercase tracking-widest">v3.3</div>
           </div>
         </div>
 
@@ -1571,7 +1622,7 @@ function OCRCapture({ config, onExtract, show, setShow, accentColor }) {
               {debug.needsRowChoice && (
                 <div className="space-y-2">
                   <div className="p-2.5 border border-sky-900/50 bg-sky-950/20 rounded text-xs text-sky-200/90">
-                    <span className="font-mono text-sky-400">ℹ Choix requis :</span> 5 lignes du tableau ont été lues, mais la flèche n'est pas claire. Choisissez la ligne correspondant à la flèche sur la feuille papier.
+                    <span className="font-mono text-sky-400">ℹ Choix requis :</span> {debug.deduction || `${debug.needsRowChoice.length} ligne(s) du tableau lue(s). Choisissez la ligne correspondant à la flèche sur la feuille papier.`}
                   </div>
                   <div className="space-y-1">
                     {debug.needsRowChoice.map((row, i) => (
