@@ -624,6 +624,9 @@ function parseTorsionOCR(text) {
   // === Détection du mode Duplex ===
   const isDuplex = /<<\s*duplex\s*>>/i.test(text) || /nombre de duplex/i.test(text);
 
+  // === PillowBlock (détecté tôt car utilisé dans le plafond NbShaft plus bas) ===
+  result.PillowBlock = /utilisez\s+des\s+pillow\s*block/i.test(text) ? 1 : 0;
+
   // === 1. Nombre de ressorts ===
   // L'OCR perd parfois des lettres. On voit régulièrement:
   //   "Nombre de ressort(s) :2"  → texte original
@@ -1139,16 +1142,24 @@ function parseTorsionOCR(text) {
   result.Tubing = tubingCount > 0 ? 1 : 0;
   result.Plein = pleinCount > 0 ? 1 : 0;
 
-  // NbShaft: total des unités. Si la somme dépasse un seuil plausible 
-  // (typiquement max 2 sur ces feuilles), c'est presque toujours une erreur 
-  // d'OCR sur le préfixe [N]. On limite alors à max(2, NbRessorts) et on 
+  // NbShaft: total des unités. Si la somme dépasse un seuil plausible, c'est 
+  // presque toujours une erreur d'OCR sur le préfixe [N]. On plafonne et on 
   // signale l'auto-correction à l'utilisateur.
+  //
+  // Plafond de base = NbRessorts (typiquement 1 shaft par ressort).
+  // Exception: si PillowBlock ou Duplex sont détectés, on peut avoir 2 shafts
+  // pour 1 ressort (cas pillow block ou duplex où le shaft est complexe).
+  //
   // Cas connus: 
-  //   - "[1]" lu comme "[4]" (ALU SERVICE) → 4 corrigé à 2
-  //   - "[2]" lu comme "3" (PRO-TECH 9405-5787 v3) → 3 corrigé à 2
+  //   - "[1]" lu "[4]" (ALU SERVICE) avec NbRessorts=1 → 4 corrigé à 1
+  //   - "[2]" lu "3" (PRO-TECH 9405-5787) avec NbRessorts=2 → 3 corrigé à 2
+  //   - feuille duplex avec NbRessorts=1: NbShaft=2 légitime (Duplex=1 lève le cap)
   const totalShafts = tubingCount + pleinCount;
   const ressortBased = result.NbRessorts || 1;
-  const plausibleCap = Math.max(2, ressortBased);
+  let plausibleCap = Math.max(1, ressortBased);
+  if (result.PillowBlock === 1 || result.Duplex === 1) {
+    plausibleCap = Math.max(plausibleCap, 2);
+  }
   if (totalShafts > plausibleCap) {
     result.NbShaft = plausibleCap;
     result._debug.shaftSuspect = `Compte de shafts détecté (${totalShafts}) trop élevé pour ${ressortBased} ressort(s) — limité automatiquement à ${plausibleCap}. Vérifiez la valeur sur la feuille papier (l'OCR confond parfois [1], [2] avec d'autres chiffres).`;
@@ -1157,9 +1168,7 @@ function parseTorsionOCR(text) {
   }
   if (longShaft) result.LongShaft = longShaft;
 
-  // === 4. Pillow Block ===
-  result.PillowBlock = /utilisez\s+des\s+pillow\s*block/i.test(text) ? 1 : 0;
-
+  // Note: PillowBlock détecté plus haut (avant le calcul de NbShaft).
   if (result.Duplex === undefined) result.Duplex = 0;
 
   // Nettoyer: ne garder que les champs valides + debug
@@ -1240,7 +1249,7 @@ export default function App() {
                 RESSORT<span className={mode === 'torsion' ? 'text-orange-500' : 'text-cyan-400'}>.</span>CALC
               </h1>
             </div>
-            <div className="font-mono text-[10px] text-neutral-500 uppercase tracking-widest">v3.4</div>
+            <div className="font-mono text-[10px] text-neutral-500 uppercase tracking-widest">v3.5</div>
           </div>
         </div>
 
