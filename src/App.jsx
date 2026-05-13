@@ -625,7 +625,12 @@ function parseTorsionOCR(text) {
   const isDuplex = /<<\s*duplex\s*>>/i.test(text) || /nombre de duplex/i.test(text);
 
   // === 1. Nombre de ressorts ===
-  const mNbR = text.match(/(?:n?ombre\s*de\s*)?ressort\(s\)\s*:?\s*(\d+)/i);
+  // L'OCR perd parfois des lettres. On voit régulièrement:
+  //   "Nombre de ressort(s) :2"  → texte original
+  //   "Nembre de ressor(s):2"    → OCR avec o→e et perte du 't' final
+  // On rend donc le 't' final et le préfixe "Nombre de" optionnels.
+  // L'ancrage fort reste "(s)" qui distingue cette ligne d'autres champs.
+  const mNbR = text.match(/ressort?\(s\)\s*:?\s*(\d+)/i);
   result.NbRessorts = mNbR ? parseInt(mNbR[1]) : 1;
 
   // NOTE: Le Poids pour l'estimation n'est PAS le poids "Poids: X lbs" de l'en-tête
@@ -668,18 +673,22 @@ function parseTorsionOCR(text) {
     const tableRows = [];
     // Détecter les lignes du tableau par présence de "G D" (avec tolérance OCR)
     // 
-    // Le regex GD principal accepte plusieurs variantes OCR fréquentes:
+    // Le regex accepte:
     //   - 1er caractère: G/C/S/6 (G confondu avec C, S, ou un 6 — boucle ouverte)
-    //   - 2e caractère: D/O/0 (D confondu avec O ou un zéro — formes arrondies)
-    //   - case-insensitive: catche les minuscules ("gd", "co", "sd", "6o", etc.)
+    //   - 2e caractère: D obligatoire (un point vertical bien distinct)
+    //   - case-insensitive: catche les minuscules ("gd", "sd", "6d", etc.)
     //   - lettres intercalées entre G et D ("GiDg", "GAD", etc.)
     //
-    // Exemples couverts: GD CD SD 6D gd cd sd 6d GO CO SO 6O go co so 6o G0 etc.
+    // Exemples couverts: GD CD SD 6D gd cd sd 6d (avec ou sans lettres au milieu).
     //
-    // Pour exclure les faux positifs comme "GESTION DCG" ou "Coupe-froid", on exige
-    // qu'il y ait au moins 1 nombre AVANT le GD dans la ligne (le diamètre, la maille,
-    // etc.) — sinon une simple ligne de texte avec "co" matcherait.
-    const gdRe = /\b[GCS6][a-zA-Z]{0,3}\s*[D0O][a-zA-Z]{0,2}\b/i;
+    // NOTE: on n'élargit PAS le D à O ou 0. Tentative précédente: faux positifs
+    // dévastateurs comme "60" (la paire de chiffres matchait [GCS6]+[D0O]) et
+    // "Co" / "So" / "Gon" dans des lignes hors-tableau. Le bénéfice (catcher
+    // "co" sur ligne 3 3/4 d'une feuille) ne justifie pas le coût.
+    //
+    // Pour exclure les faux positifs comme "GESTION DCG", on exige aussi qu'il
+    // y ait au moins 1 nombre AVANT le GD et au moins 3 nombres au total.
+    const gdRe = /\b[GCS6][a-zA-Z]{0,3}\s*D[a-zA-Z]{0,2}\b/i;
 
     for (let i = 0; i < lines.length; i++) {
       const raw = lines[i];
@@ -1059,13 +1068,15 @@ function parseTorsionOCR(text) {
   let tubingCount = 0, pleinCount = 0, longShaft = null;
   for (const line of lines) {
     const lineL = line.toLowerCase();
-    const isTube = /\btube\b/i.test(lineL);
+    // Détection Tube: on accepte "tube" suivi d'un word-boundary OU d'un chiffre.
+    // L'OCR colle parfois le count au mot: "Tube1x 132po" au lieu de "Tube 1 x 132 po".
+    const isTube = /\btube(\b|(?=\d))/i.test(lineL);
     // Sans \b autour de 'plein' pour capturer 'Amrepleinix' (OCR mangling)
     const isPlein = /arbre\s*plein|plein/i.test(lineL);
     if (!isTube && !isPlein) continue;
 
     // Position du mot-clé (Tube ou Arbre plein)
-    const wordPos = lineL.search(/\btube\b|arbre\s*plein|plein/i);
+    const wordPos = lineL.search(/\btube(?:\b|(?=\d))|arbre\s*plein|plein/i);
     const beforeWord = line.slice(0, wordPos);
     const prefixNumbers = beforeWord.match(/\d+/g) || [];
     
@@ -1229,7 +1240,7 @@ export default function App() {
                 RESSORT<span className={mode === 'torsion' ? 'text-orange-500' : 'text-cyan-400'}>.</span>CALC
               </h1>
             </div>
-            <div className="font-mono text-[10px] text-neutral-500 uppercase tracking-widest">v3.3</div>
+            <div className="font-mono text-[10px] text-neutral-500 uppercase tracking-widest">v3.4</div>
           </div>
         </div>
 
